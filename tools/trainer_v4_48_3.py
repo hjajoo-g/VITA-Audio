@@ -1149,6 +1149,8 @@ class Trainer(HFTrainer):
         """
         print_batch(inputs, self.processing_class, self.args)
 
+        step_start_time = time.time()
+
         model.train()
         if hasattr(self.optimizer, "train") and callable(self.optimizer.train):
             self.optimizer.train()
@@ -1206,6 +1208,11 @@ class Trainer(HFTrainer):
                 kwargs["scale_wrt_gas"] = False
 
             self.accelerator.backward(loss, **kwargs)
+
+            # Log step time
+            if self.state.global_step % self.args.logging_steps == 0 and self.args.should_log:
+                elapsed_time = time.time() - step_start_time
+                logger.info(f"Step {self.state.global_step}: took {elapsed_time:.4f} seconds")
 
             return loss.detach()
 
