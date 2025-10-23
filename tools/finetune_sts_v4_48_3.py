@@ -281,6 +281,8 @@ class TrainingArguments(transformers.TrainingArguments):
     profile_active: int = field(default=3, metadata={"help": "Profiler active"})
     profile_repeat: int = field(default=1, metadata={"help": "Profiler repeat"})
 
+    memory_profile: bool = field(default=False, metadata={"help": "Enable CUDA memory profiling"})
+
 
 def main():
     # See all possible arguments in src/transformers/training_args.py
@@ -316,6 +318,12 @@ def main():
     transformers.utils.logging.set_verbosity(log_level)
     transformers.utils.logging.enable_default_handler()
     transformers.utils.logging.enable_explicit_format()
+
+    # Start memory profiling early if enabled
+    if training_args.memory_profile and training_args.local_rank == 0:
+        logger.info("Starting CUDA memory history recording with max_entries=2000000...")
+        torch.cuda.memory._record_memory_history(max_entries=2000000)
+        logger.info("CUDA memory history recording started.")
 
     # test_npu(training_args)
     # torch_npu.npu.set_device("npu")
@@ -701,19 +709,34 @@ def main():
             checkpoint = training_args.resume_from_checkpoint
         elif last_checkpoint is not None:
             checkpoint = last_checkpoint
-        train_result = trainer.train(resume_from_checkpoint=checkpoint)
-        trainer.save_model()  # Saves the tokenizer too for easy upload
+        try:
+            train_result = trainer.train(resume_from_checkpoint=checkpoint)
+            trainer.save_model()  # Saves the tokenizer too for easy upload
 
-        metrics = train_result.metrics
+            metrics = train_result.metrics
 
-        max_train_samples = (
-            data_args.max_train_samples if data_args.max_train_samples is not None else len(train_dataset)
-        )
-        metrics["train_samples"] = min(max_train_samples, len(train_dataset))
+            max_train_samples = (
+                data_args.max_train_samples if data_args.max_train_samples is not None else len(train_dataset)
+            )
+            metrics["train_samples"] = min(max_train_samples, len(train_dataset))
 
-        trainer.log_metrics("train", metrics)
-        trainer.save_metrics("train", metrics)
-        trainer.save_state()
+            trainer.log_metrics("train", metrics)
+            trainer.save_metrics("train", metrics)
+            trainer.save_state()
+        finally:
+            # Stop memory profiling and dump snapshot if enabled
+            if training_args.memory_profile and training_args.local_rank == 0:
+                snapshot_file = os.path.join(training_args.output_dir, "memory_snapshot.pickle")
+                logger.info(f"Dumping CUDA memory snapshot to {snapshot_file}...")
+                try:
+                    torch.cuda.memory._dump_snapshot(snapshot_file)
+                    logger.info("CUDA memory snapshot complete.")
+                except Exception as e:
+                    logger.error(f"Failed to dump CUDA memory snapshot: {e}")
+                finally:
+                    logger.info("Stopping CUDA memory history recording...")
+                    torch.cuda.memory._record_memory_history(enabled=None)
+                    logger.info("CUDA memory history recording stopped.")
 
     # Evaluation
     if training_args.do_eval:
